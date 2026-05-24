@@ -1,0 +1,488 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>CompileLens — Getting Started</title>
+  <style>
+    :root {
+      --bg: #1e1f22;
+      --surface: #2b2d30;
+      --surface-alt: #393b40;
+      --text: #dfe1e5;
+      --muted: #9da0a8;
+      --accent: #3574f0;
+      --accent-hover: #4f8ff7;
+      --border: #43454a;
+      --success: #5fad65;
+      --warning: #d9a343;
+      --code-bg: #1a1b1e;
+      --font: "Segoe UI", system-ui, -apple-system, sans-serif;
+      --mono: "JetBrains Mono", "Cascadia Code", Consolas, monospace;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      font-family: var(--font);
+      font-size: 16px;
+      line-height: 1.65;
+      color: var(--text);
+      background: var(--bg);
+    }
+
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { color: var(--accent-hover); text-decoration: underline; }
+
+    .layout {
+      max-width: 920px;
+      margin: 0 auto;
+      padding: 2.5rem 1.5rem 4rem;
+    }
+
+    header {
+      margin-bottom: 2.5rem;
+      padding-bottom: 1.5rem;
+      border-bottom: 1px solid var(--border);
+    }
+
+    header h1 {
+      margin: 0 0 0.35rem;
+      font-size: 2.25rem;
+      font-weight: 600;
+      letter-spacing: -0.02em;
+    }
+
+    header .tagline {
+      margin: 0;
+      font-size: 1.125rem;
+      color: var(--muted);
+      max-width: 42rem;
+    }
+
+    .badge-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+      margin-top: 1rem;
+    }
+
+    .badge {
+      display: inline-block;
+      padding: 0.2rem 0.65rem;
+      font-size: 0.8rem;
+      font-weight: 500;
+      border-radius: 4px;
+      background: var(--surface-alt);
+      color: var(--muted);
+      border: 1px solid var(--border);
+    }
+
+    h2 {
+      margin: 2.25rem 0 0.85rem;
+      font-size: 1.45rem;
+      font-weight: 600;
+      color: #fff;
+      scroll-margin-top: 1rem;
+    }
+
+    h3 {
+      margin: 1.5rem 0 0.6rem;
+      font-size: 1.1rem;
+      font-weight: 600;
+      color: #e8eaed;
+    }
+
+    p { margin: 0 0 1rem; }
+
+    ul, ol {
+      margin: 0 0 1rem;
+      padding-left: 1.35rem;
+    }
+
+    li { margin-bottom: 0.35rem; }
+
+    hr {
+      border: none;
+      border-top: 1px solid var(--border);
+      margin: 2rem 0;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 0 0 1.25rem;
+      font-size: 0.95rem;
+      background: var(--surface);
+      border-radius: 8px;
+      overflow: hidden;
+      border: 1px solid var(--border);
+    }
+
+    th, td {
+      padding: 0.65rem 1rem;
+      text-align: left;
+      border-bottom: 1px solid var(--border);
+    }
+
+    th {
+      background: var(--surface-alt);
+      font-weight: 600;
+      color: #fff;
+    }
+
+    tr:last-child td { border-bottom: none; }
+
+    code {
+      font-family: var(--mono);
+      font-size: 0.88em;
+      background: var(--code-bg);
+      padding: 0.15em 0.4em;
+      border-radius: 4px;
+      border: 1px solid var(--border);
+    }
+
+    pre {
+      background: var(--code-bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 1rem 1.15rem;
+      overflow-x: auto;
+      margin: 0 0 1.25rem;
+      font-family: var(--mono);
+      font-size: 0.875rem;
+      line-height: 1.5;
+    }
+
+    pre code {
+      background: none;
+      border: none;
+      padding: 0;
+    }
+
+    .diagram {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 1rem 1.25rem;
+      margin: 0 0 1.25rem;
+      font-family: var(--mono);
+      font-size: 0.8rem;
+      line-height: 1.45;
+      white-space: pre;
+      overflow-x: auto;
+      color: var(--muted);
+    }
+
+    .callout {
+      background: var(--surface);
+      border-left: 4px solid var(--accent);
+      border-radius: 0 8px 8px 0;
+      padding: 1rem 1.15rem;
+      margin: 0 0 1.25rem;
+    }
+
+    .callout.success { border-left-color: var(--success); }
+    .callout.warning { border-left-color: var(--warning); }
+
+    .callout strong { color: #fff; }
+
+    nav.toc {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 1rem 1.25rem;
+      margin-bottom: 2rem;
+    }
+
+    nav.toc h2 {
+      margin: 0 0 0.65rem;
+      font-size: 0.95rem;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      color: var(--muted);
+    }
+
+    nav.toc ol {
+      margin: 0;
+      padding-left: 1.25rem;
+    }
+
+    nav.toc a { color: var(--text); }
+    nav.toc a:hover { color: var(--accent); }
+
+    footer {
+      margin-top: 3rem;
+      padding-top: 1.5rem;
+      border-top: 1px solid var(--border);
+      font-size: 0.9rem;
+      color: var(--muted);
+    }
+  </style>
+</head>
+<body>
+  <div class="layout">
+    <header>
+      <h1>CompileLens — Getting Started</h1>
+      <p class="tagline">
+        A live IntelliJ IDEA dashboard for Java classes that do not compile—see every problem,
+        jump to the source, and watch the list update as you fix code.
+      </p>
+      <div class="badge-row">
+        <span class="badge">IntelliJ IDEA 2025.3+</span>
+        <span class="badge">Java</span>
+        <span class="badge">org.devinflow.compilelense</span>
+        <span class="badge">v1.0.0-SNAPSHOT</span>
+      </div>
+    </header>
+
+    <nav class="toc" aria-label="Table of contents">
+      <h2>On this page</h2>
+      <ol>
+        <li><a href="#requirements">Requirements</a></li>
+        <li><a href="#installation">Installation</a></li>
+        <li><a href="#open">Open the dashboard</a></li>
+        <li><a href="#first-run">First run</a></li>
+        <li><a href="#layout">Dashboard layout</a></li>
+        <li><a href="#live-updates">Live updates</a></li>
+        <li><a href="#issue-types">Issue types</a></li>
+        <li><a href="#workflow">Recommended workflow</a></li>
+        <li><a href="#troubleshooting">Troubleshooting</a></li>
+        <li><a href="#developers">For developers</a></li>
+        <li><a href="#quick-reference">Quick reference</a></li>
+      </ol>
+    </nav>
+
+    <section id="intro">
+      <div class="callout">
+        <strong>What is CompileLens?</strong>
+        CompileLens aggregates editor diagnostics, the Problems view, and compiler output into one
+        tool window so you can track unresolved and uncompiled Java classes across your project
+        without hunting through individual editor tabs.
+      </div>
+    </section>
+
+    <section id="requirements">
+      <h2>Requirements</h2>
+      <table>
+        <thead>
+          <tr><th>Requirement</th><th>Details</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>IDE</td><td>IntelliJ IDEA <strong>2025.3+</strong> (Ultimate or compatible build with Java support)</td></tr>
+          <tr><td>Language</td><td><strong>Java</strong> source files (<code>.java</code>) in configured source roots</td></tr>
+          <tr><td>Plugins</td><td>Java support and Kotlin plugin (declared dependencies)</td></tr>
+          <tr><td>Projects</td><td>Maven, Gradle, or plain Java modules</td></tr>
+        </tbody>
+      </table>
+      <p>CompileLens analyzes Java sources only; Kotlin-only files are out of scope.</p>
+    </section>
+
+    <section id="installation">
+      <h2>Installation</h2>
+
+      <h3>From source (developers)</h3>
+      <ol>
+        <li>Open this repository in IntelliJ IDEA and wait for Gradle sync.</li>
+        <li>Run the <strong>Run Plugin</strong> configuration, or execute:</li>
+      </ol>
+      <pre><code># macOS / Linux
+./gradlew runIde
+
+# Windows
+gradlew.bat runIde</code></pre>
+      <p>A sandbox IDE starts with CompileLens installed. Open a Java project to try it.</p>
+
+      <h3>From JetBrains Marketplace</h3>
+      <p>
+        When published, install <strong>CompileLens</strong> via
+        <strong>Settings → Plugins → Marketplace</strong>, then restart the IDE.
+      </p>
+    </section>
+
+    <section id="open">
+      <h2>Open the dashboard</h2>
+      <ul>
+        <li><strong>Tool window</strong> — Click <strong>CompileLens</strong> on the right tool window stripe.</li>
+        <li><strong>View menu</strong> — <strong>View → CompileLens</strong></li>
+        <li><strong>Tools menu</strong> — <strong>Tools → CompileLens</strong></li>
+      </ul>
+      <p>The window shows a sidebar (summary and filters) and a main table (classes with issues).</p>
+    </section>
+
+    <section id="first-run">
+      <h2>First run</h2>
+      <ol>
+        <li>CompileLens waits until your project leaves <em>dumb mode</em> (indexing complete).</li>
+        <li>An initial <strong>re-scan</strong> runs: rebuilds open projects and populates the table.</li>
+        <li>The sidebar shows totals, per-module counts, and last scan time.</li>
+      </ol>
+      <div class="callout success">
+        <strong>After the first scan,</strong> the list updates automatically as you fix errors—rows
+        disappear when the IDE clears diagnostics for that file.
+      </div>
+    </section>
+
+    <section id="layout">
+      <h2>Dashboard layout</h2>
+      <div class="diagram">┌─────────────────────┬──────────────────────────────────────────┐
+│  Sidebar            │  Main panel                              │
+│  • Total count      │  Search + sort                           │
+│  • Module breakdown │  ┌────────────────────────────────────┐  │
+│  • Last scan time   │  │ Class │ Folder │ Line numbers      │  │
+│  • Re-scan (↻)      │  └────────────────────────────────────┘  │
+│  • Module filter    │                                          │
+│  • Open files only  │                                          │
+└─────────────────────┴──────────────────────────────────────────┘</div>
+
+      <h3>Sidebar</h3>
+      <table>
+        <thead><tr><th>Control</th><th>Purpose</th></tr></thead>
+        <tbody>
+          <tr><td>Summary</td><td>Classes with issues and affected module count</td></tr>
+          <tr><td>Fix suggestions</td><td>Issues that may need imports or dependencies</td></tr>
+          <tr><td>Last scan</td><td>Time since the dashboard was last updated</td></tr>
+          <tr><td>Refresh (↻)</td><td>Full re-scan: rebuild all open projects</td></tr>
+          <tr><td>Module filter</td><td>One module or <strong>All Modules</strong></td></tr>
+          <tr><td>Show only open files</td><td>Limit the table to open editor tabs</td></tr>
+        </tbody>
+      </table>
+
+      <h3>Main table</h3>
+      <table>
+        <thead><tr><th>Column</th><th>Description</th></tr></thead>
+        <tbody>
+          <tr><td><strong>Class</strong></td><td>Class name, package, and file name</td></tr>
+          <tr><td><strong>Folder</strong></td><td>Parent folder (click to reveal in Project view)</td></tr>
+          <tr><td><strong>Location</strong></td><td>Error line numbers (click to jump to the editor)</td></tr>
+        </tbody>
+      </table>
+
+      <h3>Navigation</h3>
+      <ul>
+        <li><strong>Double-click</strong> a row → open at the first error line.</li>
+        <li><strong>Click a line number</strong> → open at that line.</li>
+        <li><strong>Click Folder</strong> → highlight the parent folder in the project tree.</li>
+      </ul>
+      <p>Use the search box to filter by class, package, folder, or module. Sort by folder or class name.</p>
+    </section>
+
+    <section id="live-updates">
+      <h2>Live updates</h2>
+      <p>CompileLens refreshes the dashboard without manual action:</p>
+      <ul>
+        <li><strong>While editing</strong> — Fixed files are removed after code analysis finishes (typically within about a second).</li>
+        <li><strong>Save / VFS</strong> — Saving files or editing <code>pom.xml</code> / Gradle build files triggers a scan.</li>
+        <li><strong>Problems view</strong> — Appearing or disappearing problems update the list.</li>
+        <li><strong>After build</strong> — Compiler messages from the last rebuild are included; stale per-file build errors clear when the editor shows no issues.</li>
+      </ul>
+      <div class="callout warning">
+        Use <strong>Re-scan</strong> when you need a full <strong>Build → Rebuild Project</strong>
+        pass—for example after large dependency or module structure changes.
+      </div>
+    </section>
+
+    <section id="issue-types">
+      <h2>Issue types</h2>
+      <table>
+        <thead><tr><th>Type</th><th>Typical cause</th></tr></thead>
+        <tbody>
+          <tr><td>Unresolved import</td><td>Missing or incorrect <code>import</code></td></tr>
+          <tr><td>Class not found</td><td>Type not on the classpath</td></tr>
+          <tr><td>Missing dependency</td><td>Package or symbol requires a library or module dependency</td></tr>
+          <tr><td>Compilation error</td><td>Syntax, type errors, and other javac/IDE diagnostics</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section id="workflow">
+      <h2>Recommended workflow</h2>
+      <ol>
+        <li>Open your Java project and wait for indexing.</li>
+        <li>Open <strong>CompileLens</strong> from the right tool window stripe.</li>
+        <li>Use the sidebar module breakdown to prioritize busy modules.</li>
+        <li>Click a row or line number to jump to the code and fix the error.</li>
+        <li>Confirm the row disappears when the red underline clears.</li>
+        <li>Click <strong>Re-scan</strong> after POM/Gradle or module changes if the list seems stale.</li>
+      </ol>
+    </section>
+
+    <section id="troubleshooting">
+      <h2>Troubleshooting</h2>
+      <table>
+        <thead><tr><th>Symptom</th><th>What to try</th></tr></thead>
+        <tbody>
+          <tr>
+            <td>Dashboard empty but editor shows errors</td>
+            <td>Wait for indexing; click <strong>Re-scan</strong>; confirm the file is under a Java source root</td>
+          </tr>
+          <tr>
+            <td>Fixed file still listed</td>
+            <td>Wait for analysis to finish; click <strong>Re-scan</strong> if needed</td>
+          </tr>
+          <tr>
+            <td>No updates while editing</td>
+            <td>Ensure <code>.java</code> file and project is not indexing (dumb mode)</td>
+          </tr>
+          <tr>
+            <td>Re-scan is slow</td>
+            <td>Expected on large multi-module projects (full rebuild per open project)</td>
+          </tr>
+          <tr>
+            <td>Plugin not visible</td>
+            <td><strong>Settings → Plugins</strong> — enable CompileLens and restart</td>
+          </tr>
+        </tbody>
+      </table>
+      <p>
+        <strong>Logs:</strong> Search <code>idea.log</code> for <code>CompileLens</code> in development sandboxes.
+      </p>
+    </section>
+
+    <section id="privacy">
+      <h2>Privacy and scope</h2>
+      <ul>
+        <li>Analysis uses local project data only (PSI, highlights, compiler output in the IDE).</li>
+        <li>Scans cover open projects and Java sources in source roots.</li>
+        <li>The plugin does not send data to external services.</li>
+      </ul>
+    </section>
+
+    <section id="developers">
+      <h2>For plugin developers</h2>
+      <table>
+        <thead><tr><th>Task</th><th>Command / location</th></tr></thead>
+        <tbody>
+          <tr><td>Run in sandbox</td><td><code>./gradlew runIde</code> or <strong>Run Plugin</strong></td></tr>
+          <tr><td>Build</td><td><code>./gradlew build</code></td></tr>
+          <tr><td>Plugin ID</td><td><code>org.devinflow.compilelense</code></td></tr>
+          <tr><td>Sources</td><td><code>src/main/kotlin/org/devinflow/compilelense/</code></td></tr>
+        </tbody>
+      </table>
+      <p>See <a href="../README.md">README.md</a> for project structure and publishing.</p>
+    </section>
+
+    <section id="quick-reference">
+      <h2>Quick reference</h2>
+      <table>
+        <thead><tr><th>Action</th><th>How</th></tr></thead>
+        <tbody>
+          <tr><td>Open dashboard</td><td>Right stripe <strong>CompileLens</strong>, or <strong>View / Tools → CompileLens</strong></td></tr>
+          <tr><td>Jump to error</td><td>Click line number or double-click row</td></tr>
+          <tr><td>Filter by module</td><td>Sidebar module dropdown</td></tr>
+          <tr><td>Search</td><td>Main panel search field</td></tr>
+          <tr><td>Full rebuild + refresh</td><td>Sidebar <strong>↻</strong> Re-scan</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <footer>
+      <p>
+        <strong>CompileLens</strong> · Plugin ID <code>org.devinflow.compilelense</code> · Version 1.0.0-SNAPSHOT<br>
+        Also available as <a href="GETTING_STARTED.md">GETTING_STARTED.md</a>
+      </p>
+    </footer>
+  </div>
+</body>
+</html>
