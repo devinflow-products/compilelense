@@ -1,0 +1,40 @@
+<!-- Plugin Configuration File. Read more: https://plugins.jetbrains.com/docs/intellij/plugin-configuration-file.html -->
+<idea-plugin>
+    <id>org.devinflow.compilelense</id>
+    <name>CompileLens</name>
+    <vendor url="https://www.yourcompany.com">YourCompany</vendor>
+
+    <description><![CDATA[
+        Live CompileLens Dashboard that tracks unresolved and uncompiled Java classes across your project,
+        with continuous auto-updates as code and dependencies change.
+        ]]></description>
+
+    <depends>com.intellij.modules.platform</depends>
+    <depends>com.intellij.modules.java</depends>
+    <depends>org.jetbrains.kotlin</depends>
+
+    <resource-bundle>messages.MyMessageBundle</resource-bundle>
+
+    <extensions defaultExtensionNs="com.intellij">
+        <postStartupActivity implementation="org.devinflow.compilelense.CompileLensStartupActivity"/>
+        <projectService serviceImplementation="org.devinflow.compilelense.scan.CompileLensScanService"/>
+
+        <toolWindow id="CompileLens"
+                    factoryClass="org.devinflow.compilelense.CompileLensToolWindowFactory"
+                    icon="AllIcons.General.Error"
+                    anchor="right"
+                    canCloseContents="true"/>
+
+        <action id="CompileLens.Open"
+                class="org.devinflow.compilelense.CompileLensOpenAction"
+                text="CompileLens"
+                description="Open the CompileLens uncompiled-classes dashboard">
+            <add-to-group group-id="ViewMenu" anchor="last"/>
+            <add-to-group group-id="ToolsMenu" anchor="last"/>
+        </action>
+    </extensions>
+
+    <extensions defaultExtensionNs="org.jetbrains.kotlin">
+        <supportsKotlinPluginMode supportsK2="true"/>
+    </extensions>
+</idea-plugin>
