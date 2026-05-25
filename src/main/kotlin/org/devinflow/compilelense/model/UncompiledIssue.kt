@@ -8,6 +8,7 @@ data class UncompiledIssue(
     val issueSummary: String,
     val issueDetail: String,
     val moduleName: String,
+    val projectName: String,
     val lineNumber: Int,
     val virtualFilePath: String,
     val hasFixSuggestion: Boolean = false,

@@ -5,11 +5,15 @@ data class UncompiledClassRow(
     val fileName: String,
     val packageName: String,
     val moduleName: String,
+    val projectName: String,
     val parentFolderName: String,
     val virtualFilePath: String,
     val lineNumbers: List<Int>,
     val hasFixSuggestion: Boolean = false,
 ) {
+    val displayModuleName: String
+        get() = if (moduleName == projectName) projectName else "$projectName · $moduleName"
+
     companion object {
         fun fromIssues(issues: List<UncompiledIssue>): List<UncompiledClassRow> =
             issues.groupBy { it.virtualFilePath }
@@ -20,6 +24,7 @@ data class UncompiledClassRow(
                         fileName = first.fileName,
                         packageName = first.packageName,
                         moduleName = first.moduleName,
+                        projectName = first.projectName,
                         parentFolderName = parentFolderName(first.virtualFilePath),
                         virtualFilePath = first.virtualFilePath,
                         lineNumbers = fileIssues.map { it.lineNumber }.distinct().sorted(),

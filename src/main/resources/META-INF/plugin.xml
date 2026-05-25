@@ -2,7 +2,7 @@
 <idea-plugin>
     <id>org.devinflow.compilelense</id>
     <name>CompileLens</name>
-    <vendor url="https://www.yourcompany.com">YourCompany</vendor>
+    <vendor url="https://plugins.jetbrains.com/plugin/devinflow">DevInFlow</vendor>
 
     <description><![CDATA[
         Live CompileLens Dashboard that tracks unresolved and uncompiled Java classes across your project,
@@ -12,11 +12,13 @@
     <depends>com.intellij.modules.platform</depends>
     <depends>com.intellij.modules.java</depends>
     <depends>org.jetbrains.kotlin</depends>
+    <depends optional="true" config-file="compilelense-maven.xml">org.jetbrains.idea.maven</depends>
 
     <resource-bundle>messages.MyMessageBundle</resource-bundle>
 
     <extensions defaultExtensionNs="com.intellij">
-        <postStartupActivity implementation="org.devinflow.compilelense.CompileLensStartupActivity"/>
+        <postStartupActivity implementation="org.devinflow.compilelense.CompileLensStartupActivity" order="last"/>
+        <projectService serviceImplementation="org.devinflow.compilelense.scan.CompilationErrorService"/>
         <projectService serviceImplementation="org.devinflow.compilelense.scan.CompileLensScanService"/>
 
         <toolWindow id="CompileLens"

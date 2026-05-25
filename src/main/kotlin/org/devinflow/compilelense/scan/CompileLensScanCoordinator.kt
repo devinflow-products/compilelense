@@ -1,23 +1,118 @@
 package org.devinflow.compilelense.scan
 
-import com.intellij.codeInsight.daemon.DaemonCodeAnalyzer
-import com.intellij.openapi.project.DumbService
 import com.intellij.openapi.project.Project
-import com.intellij.openapi.project.ProjectManager
-import org.devinflow.compilelense.build.CompileLensBuildTrigger
+import org.devinflow.compilelense.model.UncompiledIssue
+import java.util.Locale
 
 /**
- * Coordinates scans across every open project in the IDE window.
+ * Workspace-wide scan coordination shared by every open project window.
  */
-internal object CompileLensScanCoordinator {
+object CompileLensScanCoordinator {
+
+    private val workspaceSnapshotReady = java.util.concurrent.atomic.AtomicBoolean(false)
+    private val startupWithBuildStarted = java.util.concurrent.atomic.AtomicBoolean(false)
+    private val rebuildInProgress = java.util.concurrent.atomic.AtomicBoolean(false)
+    private val rebuildQueued = java.util.concurrent.atomic.AtomicBoolean(false)
 
     fun openProjects(): List<Project> =
-        ProjectManager.getInstance().openProjects.filter { !it.isDisposed }
+        com.intellij.openapi.project.ProjectManager.getInstance().openProjects.filter { !it.isDisposed }
 
     fun dumbProjects(): List<Project> =
-        openProjects().filter { DumbService.getInstance(it).isDumb }
+        openProjects().filter { com.intellij.openapi.project.DumbService.getInstance(it).isDumb }
 
     fun allOpenProjectsSmart(): Boolean = dumbProjects().isEmpty()
+
+    fun isWorkspaceSnapshotReady(): Boolean = workspaceSnapshotReady.get()
+
+    fun markWorkspaceSnapshotReady() {
+        workspaceSnapshotReady.set(true)
+    }
+
+    fun resetWorkspaceSnapshotReady() {
+        workspaceSnapshotReady.set(false)
+    }
+
+    fun aggregateWorkspaceIssues(): List<UncompiledIssue> =
+        openProjects()
+            .flatMap { CompilationErrorService.getInstance(it).getAllIssues() }
+            .let { dedupeIssues(it) }
+
+    fun aggregateWorkspaceSnapshot(): org.devinflow.compilelense.model.DashboardSnapshot {
+        val lastScan = openProjects()
+            .mapNotNull { openProject ->
+                openProject.takeIf { !it.isDisposed }
+                    ?.let { CompileLensScanService.getInstance(it).getSnapshot().lastScan }
+            }
+            .maxOrNull() ?: java.time.Instant.EPOCH
+        return org.devinflow.compilelense.model.DashboardSnapshot(aggregateWorkspaceIssues(), lastScan)
+    }
+
+    fun clearAllErrorServices() {
+        for (openProject in openProjects()) {
+            if (!openProject.isDisposed) {
+                CompilationErrorService.getInstance(openProject).clearDashboard()
+            }
+        }
+    }
+
+    fun syncWorkspaceIssues(issues: List<UncompiledIssue>) {
+        val deduped = dedupeIssues(issues)
+        for (openProject in openProjects()) {
+            if (!openProject.isDisposed) {
+                CompilationErrorService.getInstance(openProject).replaceAll(deduped)
+            }
+        }
+    }
+
+    fun mergeScanIntoWorkspace(
+        scannedFilePaths: Set<String>,
+        scannedIssues: List<UncompiledIssue>,
+        fullReplace: Boolean,
+    ): List<UncompiledIssue> {
+        if (fullReplace) return dedupeIssues(scannedIssues)
+        val normalizedScanned = scannedFilePaths.map { CompileLensPaths.normalize(it) }.toSet()
+        val preserved = aggregateWorkspaceIssues()
+            .filter { CompileLensPaths.normalize(it.virtualFilePath) !in normalizedScanned }
+        return dedupeIssues(preserved + scannedIssues)
+    }
+
+    fun dedupeIssues(issues: List<UncompiledIssue>): List<UncompiledIssue> =
+        issues.distinctBy { "${it.virtualFilePath}:${it.lineNumber}:${it.issueDetail.lowercase(Locale.getDefault())}" }
+            .sortedWith(compareBy({ it.projectName }, { it.moduleName }, { it.fileName }, { it.lineNumber }))
+
+    /**
+     * One-time workspace bootstrap: rebuild every open project so javac errors populate the dashboard
+     * for files that were never opened in the editor.
+     */
+    fun runStartupWithBuild(trigger: Project) {
+        if (trigger.isDisposed || !startupWithBuildStarted.compareAndSet(false, true)) return
+        CompileLensDebugLog.info(trigger, "startup: automatic rebuild of all open projects")
+        requestWorkspaceRebuild(trigger, "startup baseline") {
+            CompileLensDebugLog.info(trigger, "startup: baseline rebuild finished")
+        }
+    }
+
+    /**
+     * Queues a workspace rebuild; coalesces overlapping requests while a rebuild is already running.
+     */
+    fun requestWorkspaceRebuild(trigger: Project, reason: String, onFinished: (() -> Unit)? = null) {
+        if (trigger.isDisposed) return
+        if (rebuildInProgress.get()) {
+            rebuildQueued.set(true)
+            CompileLensDebugLog.info(trigger, "rebuild queued: $reason")
+            onFinished?.invoke()
+            return
+        }
+        rebuildInProgress.set(true)
+        CompileLensDebugLog.info(trigger, "rebuild requested: $reason")
+        rescanWithBuild(trigger) {
+            rebuildInProgress.set(false)
+            onFinished?.invoke()
+            if (rebuildQueued.compareAndSet(true, false) && !trigger.isDisposed) {
+                requestWorkspaceRebuild(trigger, "queued rebuild")
+            }
+        }
+    }
 
     /**
      * Rebuilds every open project, restarts highlighting, then scans the workspace.
@@ -28,7 +123,7 @@ internal object CompileLensScanCoordinator {
             return
         }
         CompileLensDebugLog.info(trigger, "rescanWithBuild: rebuilding all open projects")
-        CompileLensBuildTrigger.rebuildOpenProjects(trigger) {
+        org.devinflow.compilelense.build.CompileLensBuildTrigger.rebuildOpenProjects(trigger) {
             refreshScan(trigger, restartDaemon = true)
             onFinished?.invoke()
         }
@@ -39,14 +134,17 @@ internal object CompileLensScanCoordinator {
     }
 
     private fun refreshScan(trigger: Project, restartDaemon: Boolean) {
-        for (project in openProjects()) {
-            if (restartDaemon && !DumbService.getInstance(project).isDumb) {
-                DaemonCodeAnalyzer.getInstance(project).restart("CompileLens refresh")
+        resetWorkspaceSnapshotReady()
+        if (restartDaemon) {
+            for (project in openProjects()) {
+                if (!com.intellij.openapi.project.DumbService.getInstance(project).isDumb) {
+                    CompileLensWorkspaceAnalysis.scheduleProjectDaemonRestart(project, "CompileLens refresh")
+                }
             }
         }
         runWhenAllProjectsSmart(trigger) {
             if (!trigger.isDisposed) {
-                CompileLensScanService.getInstance(trigger).scheduleScan(immediate = true)
+                CompileLensScanService.getInstance(trigger).scheduleScan(immediate = true, fullWorkspace = true)
             }
         }
         CompileLensDebugLog.info(
@@ -67,7 +165,7 @@ internal object CompileLensScanCoordinator {
         )
         var remaining = waitingOn.size
         for (project in waitingOn) {
-            DumbService.getInstance(project).runWhenSmart {
+            com.intellij.openapi.project.DumbService.getInstance(project).runWhenSmart {
                 remaining -= 1
                 if (remaining <= 0 && allOpenProjectsSmart()) {
                     action()

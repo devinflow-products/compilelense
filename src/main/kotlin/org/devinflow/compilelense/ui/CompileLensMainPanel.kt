@@ -105,7 +105,8 @@ internal class CompileLensMainPanel(
                     it.packageName.lowercase().contains(query) ||
                     it.className.lowercase().contains(query) ||
                     it.parentFolderName.lowercase().contains(query) ||
-                    it.moduleName.lowercase().contains(query)
+                    it.moduleName.lowercase().contains(query) ||
+                    it.projectName.lowercase().contains(query)
             }
         }
 

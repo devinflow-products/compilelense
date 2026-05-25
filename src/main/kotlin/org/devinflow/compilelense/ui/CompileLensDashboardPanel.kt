@@ -23,7 +23,6 @@ class CompileLensDashboardPanel(private val project: Project) : JBPanel<CompileL
     private var listenerDisposable: com.intellij.openapi.Disposable? = null
     @Volatile
     private var rescanInProgress = false
-    private var initialRescanDone = false
 
     init {
         background = CompileLensUi.sidebarBackground
@@ -60,10 +59,7 @@ class CompileLensDashboardPanel(private val project: Project) : JBPanel<CompileL
 
     override fun addNotify() {
         super.addNotify()
-        if (!initialRescanDone) {
-            initialRescanDone = true
-            triggerRescan()
-        }
+        render(scanService.getSnapshot())
     }
 
     private fun triggerRescan() {

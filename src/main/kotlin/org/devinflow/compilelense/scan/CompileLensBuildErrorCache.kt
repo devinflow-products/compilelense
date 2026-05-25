@@ -12,8 +12,17 @@ internal object CompileLensBuildErrorCache {
     private val errorsByProject = ConcurrentHashMap<String, List<UncompiledIssue>>()
 
     fun store(project: Project, issues: List<UncompiledIssue>) {
-        if (project.isDisposed) return
-        errorsByProject[project.locationHash] = issues
+        merge(project, issues)
+    }
+
+    fun merge(project: Project, issues: List<UncompiledIssue>) {
+        if (project.isDisposed || issues.isEmpty()) return
+        val key = project.locationHash
+        val existing = errorsByProject[key].orEmpty()
+        val combined = (existing + issues).distinctBy {
+            "${CompileLensPaths.normalize(it.virtualFilePath)}:${it.lineNumber}:${it.issueDetail}"
+        }
+        errorsByProject[key] = combined
     }
 
     fun get(project: Project): List<UncompiledIssue> =
@@ -27,7 +36,8 @@ internal object CompileLensBuildErrorCache {
         if (project.isDisposed) return
         val key = project.locationHash
         val current = errorsByProject[key] ?: return
-        val updated = current.filterNot { it.virtualFilePath == filePath }
+        val normalized = CompileLensPaths.normalize(filePath)
+        val updated = current.filterNot { CompileLensPaths.normalize(it.virtualFilePath) == normalized }
         if (updated.size == current.size) return
         if (updated.isEmpty()) {
             errorsByProject.remove(key)

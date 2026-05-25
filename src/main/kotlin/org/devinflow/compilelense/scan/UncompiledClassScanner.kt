@@ -1,187 +1,347 @@
 package org.devinflow.compilelense.scan
 
-import com.intellij.analysis.problemsView.FileProblem
-import com.intellij.analysis.problemsView.Problem
 import com.intellij.analysis.problemsView.ProblemsCollector
-import com.intellij.analysis.problemsView.toolWindow.HighlightingProblem
-import com.intellij.codeInsight.daemon.impl.HighlightInfo
-import com.intellij.codeInsight.daemon.impl.SeverityRegistrar
 import com.intellij.ide.highlighter.JavaFileType
-import com.intellij.lang.annotation.HighlightSeverity
-import com.intellij.openapi.editor.Document
-import com.intellij.openapi.editor.ex.MarkupModelEx
-import com.intellij.openapi.editor.impl.DocumentMarkupModel
-import com.intellij.openapi.fileEditor.FileDocumentManager
 import com.intellij.openapi.fileEditor.FileEditorManager
 import com.intellij.openapi.module.ModuleManager
 import com.intellij.openapi.module.ModuleUtil
 import com.intellij.openapi.project.DumbService
 import com.intellij.openapi.project.Project
-import com.intellij.openapi.project.ProjectManager
 import com.intellij.openapi.roots.ProjectFileIndex
-import com.intellij.openapi.vfs.LocalFileSystem
 import com.intellij.openapi.vfs.VirtualFile
-import com.intellij.problems.WolfTheProblemSolver
-import com.intellij.psi.PsiDocumentManager
+import com.intellij.psi.PsiErrorElement
 import com.intellij.psi.PsiJavaFile
 import com.intellij.psi.PsiManager
 import com.intellij.psi.search.FileTypeIndex
 import com.intellij.psi.search.GlobalSearchScope
-import org.devinflow.compilelense.model.IssueType
+import com.intellij.psi.util.PsiTreeUtil
+import com.intellij.problems.WolfTheProblemSolver
 import org.devinflow.compilelense.model.UncompiledIssue
 import java.util.Locale
 
 internal object UncompiledClassScanner {
 
-    private val warmedUpProjects = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
-
-    fun scan(triggeringProject: Project, previouslyTrackedPaths: Set<String> = emptySet()): List<UncompiledIssue> {
+    fun scan(
+        triggeringProject: Project,
+        previouslyTrackedPaths: Set<String> = emptySet(),
+        mode: CompileLensScanMode = CompileLensScanMode.FULL_WORKSPACE,
+    ): CompileLensScanResult {
         val results = mutableListOf<UncompiledIssue>()
         val seen = mutableSetOf<String>()
         val projects = openProjects()
 
         CompileLensDebugLog.info(
             triggeringProject,
-            "scan start: openProjects=${projects.map { it.name }}, triggering=${triggeringProject.name}",
+            "scan start: mode=$mode openProjects=${projects.map { it.name }}, triggering=${triggeringProject.name}",
         )
 
-        if (shouldWarmup(projects)) {
-            CompileLensAnalysisWarmup.ensureAnalyzed(projects, triggeringProject)
-            projects.forEach { warmedUpProjects.add(it.locationHash) }
-        }
+        val allSources = collectAllJavaFiles(projects)
+        CompileLensDebugLog.info(triggeringProject, "java sources=${allSources.size}")
 
-        val candidates = collectCandidateFiles(projects, previouslyTrackedPaths)
+        val openPathsByProject = buildOpenPathsByProject(projects)
+        val priorityPaths = buildPriorityPaths(projects, previouslyTrackedPaths, openPathsByProject)
+        val filesToCollect = selectFilesToCollect(triggeringProject, allSources, mode, priorityPaths)
+        val daemonRestartsByProject = selectDaemonRestartsByProject(
+            projects,
+            allSources,
+            mode,
+            priorityPaths,
+            openPathsByProject,
+        )
+
+        mergeBuildErrors(projects, seen, results)
+        collectIssues(projects, filesToCollect, seen, results, openPathsByProject)
+
+        val analyzedPaths = daemonRestartsByProject.values.flatten().map { it.path }.toSet()
+        updateAnalysisSession(triggeringProject, filesToCollect, results, analyzedPaths)
+
+        val sorted = results.sortedWith(compareBy({ it.projectName }, { it.moduleName }, { it.fileName }, { it.lineNumber }))
         CompileLensDebugLog.info(
             triggeringProject,
-            "candidates=${candidates.size}: ${candidates.take(10).map { it.name }}${if (candidates.size > 10) "..." else ""}",
+            "scan done: mode=$mode collected=${filesToCollect.size} issues=${sorted.size} daemonFiles=${analyzedPaths.size}",
         )
-
-        collectIssues(projects, candidates, seen, results, triggeringProject)
-        reconcileBuildErrorCache(triggeringProject, results, candidates)
-        mergeBuildErrors(triggeringProject, seen, results)
-
-        if (results.isEmpty()) {
-            val allJava = collectAllJavaFiles(projects)
-            CompileLensDebugLog.info(triggeringProject, "candidate pass empty; full scan javaFiles=${allJava.size}")
-            collectIssues(projects, allJava, seen, results, triggeringProject)
-            reconcileBuildErrorCache(triggeringProject, results, allJava)
-            mergeBuildErrors(triggeringProject, seen, results)
-        }
-
-        CompileLensDebugLog.info(
-            triggeringProject,
-            "scan done: issues=${results.size} files=${results.map { it.fileName }.distinct()}",
-        )
-        results.forEach { issue ->
+        sorted.forEach { issue ->
             CompileLensDebugLog.info(
                 triggeringProject,
                 "  -> ${issue.fileName}:${issue.lineNumber} ${issue.issueDetail}",
             )
         }
 
-        return results.sortedWith(compareBy({ it.moduleName }, { it.fileName }, { it.lineNumber }))
+        return CompileLensScanResult(
+            issues = sorted,
+            scannedFilePaths = filesToCollect.map { CompileLensPaths.normalize(it) }.toSet(),
+            incremental = mode == CompileLensScanMode.INCREMENTAL,
+            daemonRestartsByProject = daemonRestartsByProject.mapKeys { CompileLensScanResult.ProjectRef(it.key) },
+        )
+    }
+
+    private fun selectFilesToCollect(
+        triggeringProject: Project,
+        allSources: Set<VirtualFile>,
+        mode: CompileLensScanMode,
+        priorityPaths: Set<String>,
+    ): Set<VirtualFile> {
+        if (mode == CompileLensScanMode.FULL_WORKSPACE) return allSources
+        return allSources.filter { virtualFile ->
+            val path = CompileLensPaths.normalize(virtualFile)
+            path in priorityPaths || CompileLensAnalysisSession.isDirtyInAnyProject(path)
+        }.toSet()
     }
 
     private fun openProjects(): List<Project> =
         CompileLensScanCoordinator.openProjects().filter { !DumbService.isDumb(it) }
 
-    private fun shouldWarmup(projects: List<Project>): Boolean =
-        projects.any { !warmedUpProjects.contains(it.locationHash) }
+    private fun buildOpenPathsByProject(projects: List<Project>): Map<Project, Set<String>> =
+        projects.associateWith { project ->
+            FileEditorManager.getInstance(project).openFiles.mapTo(HashSet()) { CompileLensPaths.normalize(it) }
+        }
 
-    /**
-     * Drops cached javac errors for files that no longer have live IDE diagnostics,
-     * so fixing a file in the editor removes it from the dashboard without a full rebuild.
-     */
-    private fun reconcileBuildErrorCache(
-        logProject: Project,
-        results: List<UncompiledIssue>,
-        scannedFiles: Set<VirtualFile>,
-    ) {
-        if (scannedFiles.isEmpty()) return
-        val pathsWithLiveIssues = results.mapTo(HashSet()) { it.virtualFilePath }
-        var pruned = 0
-        for (file in scannedFiles) {
-            if (file.path !in pathsWithLiveIssues) {
-                val before = CompileLensBuildErrorCache.get(logProject).count { it.virtualFilePath == file.path }
-                if (before > 0) {
-                    CompileLensBuildErrorCache.removeFile(logProject, file.path)
-                    pruned += before
-                }
+    private fun buildPriorityPaths(
+        projects: List<Project>,
+        previouslyTrackedPaths: Set<String>,
+        openPathsByProject: Map<Project, Set<String>>,
+    ): Set<String> {
+        val paths = LinkedHashSet<String>()
+        paths.addAll(previouslyTrackedPaths.map { CompileLensPaths.normalize(it) })
+        for (project in projects) {
+            paths.addAll(ProblemsCollector.getInstance(project).getProblemFiles().map { CompileLensPaths.normalize(it) })
+            paths.addAll(openPathsByProject[project].orEmpty().map { CompileLensPaths.normalize(it) })
+            paths.addAll(CompileLensBuildErrorCache.get(project).map { CompileLensPaths.normalize(it.virtualFilePath) })
+        }
+        return paths
+    }
+
+    private fun selectDaemonRestartsByProject(
+        projects: List<Project>,
+        allSources: Set<VirtualFile>,
+        mode: CompileLensScanMode,
+        priorityPaths: Set<String>,
+        openPathsByProject: Map<Project, Set<String>>,
+    ): Map<Project, List<VirtualFile>> {
+        val restarts = LinkedHashMap<Project, MutableList<VirtualFile>>()
+        for (project in projects) {
+            val fileIndex = ProjectFileIndex.getInstance(project)
+            val problemSolver = WolfTheProblemSolver.getInstance(project)
+            val openPaths = openPathsByProject[project].orEmpty()
+            for (virtualFile in allSources) {
+                if (!belongsToProject(virtualFile, project, fileIndex)) continue
+                if (!shouldScheduleDaemon(project, virtualFile, mode, priorityPaths, openPaths, problemSolver)) continue
+                restarts.getOrPut(project) { ArrayList() }.add(virtualFile)
             }
         }
-        if (pruned > 0) {
-            CompileLensDebugLog.info(logProject, "pruned stale build errors: count=$pruned")
+        return restarts
+    }
+
+    private fun belongsToProject(
+        virtualFile: VirtualFile,
+        project: Project,
+        fileIndex: ProjectFileIndex,
+    ): Boolean {
+        if (!virtualFile.isValid) return false
+        val module = ModuleUtil.findModuleForFile(virtualFile, project) ?: return false
+        return fileIndex.isInSourceContent(virtualFile)
+    }
+
+    private fun shouldScheduleDaemon(
+        project: Project,
+        virtualFile: VirtualFile,
+        mode: CompileLensScanMode,
+        priorityPaths: Set<String>,
+        openPaths: Set<String>,
+        problemSolver: WolfTheProblemSolver,
+    ): Boolean {
+        val path = virtualFile.path
+        when (mode) {
+            CompileLensScanMode.FULL_WORKSPACE -> {
+                if (CompileLensAnalysisSession.isDirty(project, path)) return true
+                if (path in openPaths) return true
+                if (CompileLensAnalysisSession.wasAnalyzed(project, path) &&
+                    CompileLensAnalysisSession.isKnownClean(project, path)
+                ) {
+                    return false
+                }
+                if (problemSolver.isProblemFile(virtualFile) || problemSolver.hasSyntaxErrors(virtualFile)) {
+                    return false
+                }
+                return true
+            }
+            CompileLensScanMode.INCREMENTAL -> {
+                if (path !in priorityPaths && path !in openPaths &&
+                    !CompileLensAnalysisSession.isDirty(project, path)
+                ) {
+                    return false
+                }
+                return true
+            }
+        }
+    }
+
+    private fun updateAnalysisSession(
+        logProject: Project,
+        collectedFiles: Set<VirtualFile>,
+        results: List<UncompiledIssue>,
+        daemonScheduledPaths: Set<String>,
+    ) {
+        val pathsWithIssues = results.map { it.virtualFilePath }.toSet()
+        for (virtualFile in collectedFiles) {
+            val path = virtualFile.path
+            if (path !in daemonScheduledPaths && path !in pathsWithIssues &&
+                !CompileLensAnalysisSession.wasAnalyzed(logProject, path)
+            ) {
+                continue
+            }
+            if (path in pathsWithIssues) {
+                CompileLensAnalysisSession.clearCleanMark(logProject, path)
+            } else if (path in daemonScheduledPaths || CompileLensAnalysisSession.wasAnalyzed(logProject, path)) {
+                CompileLensAnalysisSession.markClean(logProject, path)
+            }
         }
     }
 
     private fun mergeBuildErrors(
-        logProject: Project,
+        projects: List<Project>,
         seen: MutableSet<String>,
         results: MutableList<UncompiledIssue>,
     ) {
-        val buildErrors = CompileLensBuildErrorCache.get(logProject)
-        if (buildErrors.isEmpty()) return
         var added = 0
-        for (issue in buildErrors) {
-            val key = "${issue.virtualFilePath}:build:${issue.issueDetail.lowercase(Locale.getDefault())}:${issue.lineNumber}"
-            val before = results.size
-            addIssue(
-                seen,
-                results,
-                key = key,
-                className = issue.className,
-                fileName = issue.fileName,
-                packageName = issue.packageName,
-                issueType = issue.issueType,
-                issueSummary = issue.issueSummary,
-                issueDetail = issue.issueDetail,
-                moduleName = issue.moduleName,
-                lineNumber = issue.lineNumber,
-                filePath = issue.virtualFilePath,
-            )
-            if (results.size > before) added++
+        for (openProject in projects) {
+            for (issue in CompileLensBuildErrorCache.get(openProject)) {
+                // Always merge javac build errors; collectIssues will drop them only when
+                // the IntelliJ side confirms the file is structurally clean (no live
+                // errors, no PsiErrorElement, not flagged by Wolf).
+                val key = buildKey(issue)
+                val before = results.size
+                if (seen.add(key)) {
+                    results += issue
+                }
+                if (results.size > before) added++
+            }
         }
-        CompileLensDebugLog.info(logProject, "merged compiler build errors: count=$added")
+        if (added > 0) {
+            CompileLensDebugLog.info(projects.firstOrNull() ?: return, "merged compiler build errors: count=$added")
+        }
     }
+
+    private fun buildKey(issue: UncompiledIssue): String =
+        "${issue.virtualFilePath}:build:${issue.issueDetail.lowercase(Locale.getDefault())}:${issue.lineNumber}"
 
     private fun collectIssues(
         projects: List<Project>,
         files: Set<VirtualFile>,
         seen: MutableSet<String>,
         results: MutableList<UncompiledIssue>,
-        logProject: Project,
+        openPathsByProject: Map<Project, Set<String>>,
     ) {
         if (files.isEmpty()) return
-        collectFromProblemsCollector(projects, files, seen, results, logProject)
-        collectFromDocumentHighlights(projects, files, seen, results, logProject)
+        for (virtualFile in files) {
+            val resolved = resolveJavaFile(projects, virtualFile) ?: continue
+            val (ownerProject, psiFile) = resolved
+            val normalizedPath = CompileLensPaths.normalize(virtualFile)
+            val openPaths = openPathsByProject[ownerProject].orEmpty()
+            val isOpen = normalizedPath in openPaths
+            val fileIssues = CompileLensJavaFileAnalyzer.analyzeFile(
+                ownerProject,
+                virtualFile,
+                psiFile,
+                isOpen,
+            )
+            if (isOpen && isAuthoritativelyClean(ownerProject, virtualFile, psiFile, fileIssues)) {
+                // Open file with NO live errors AND no PSI-level error elements: this is
+                // a strong "user fixed it in-IDE" signal. Drop both the live and the
+                // javac build entries (cache included) so the dashboard reflects the fix
+                // immediately, without requiring a rebuild.
+                removeAllIssuesForPath(normalizedPath, results, seen)
+                clearBuildErrorsForPath(projects, normalizedPath)
+            } else {
+                // Otherwise refresh only the live (PSI/highlight/problem) entries for
+                // this file and keep any javac build error already merged. javac is
+                // authoritative for compilation status until a real build replaces it.
+                removeLiveIssuesForPath(normalizedPath, results, seen)
+                for (issue in fileIssues) {
+                    val key = issueKey(issue)
+                    if (seen.add(key)) {
+                        results += issue
+                    }
+                }
+            }
+        }
     }
 
-    private fun collectCandidateFiles(projects: List<Project>, extraPaths: Set<String>): Set<VirtualFile> {
-        val candidates = LinkedHashSet<VirtualFile>()
-        val localFs = LocalFileSystem.getInstance()
+    private fun issueKey(issue: UncompiledIssue): String =
+        "${issue.virtualFilePath}:${issue.issueDetail.lowercase(Locale.getDefault())}:${issue.lineNumber}"
 
-        for (path in extraPaths) {
-            localFs.findFileByPath(path)?.let { candidates.add(it) }
+    /**
+     * Drops only "live" (PSI/highlight/problem) issues for [normalizedPath].
+     * javac build issues already merged in this scan are kept — used for off-screen
+     * files where we have no authoritative live signal.
+     */
+    private fun removeLiveIssuesForPath(
+        normalizedPath: String,
+        results: MutableList<UncompiledIssue>,
+        seen: MutableSet<String>,
+    ) {
+        val iterator = results.iterator()
+        while (iterator.hasNext()) {
+            val issue = iterator.next()
+            if (CompileLensPaths.normalize(issue.virtualFilePath) != normalizedPath) continue
+            if (buildKey(issue) in seen) continue
+            seen.remove(issueKey(issue))
+            iterator.remove()
         }
+    }
 
+    /**
+     * Drops every results entry for [normalizedPath], live and build alike. Used only
+     * when we have an authoritative live signal (the file is currently open in the
+     * editor and the IntelliJ daemon has had a chance to analyze it).
+     */
+    private fun removeAllIssuesForPath(
+        normalizedPath: String,
+        results: MutableList<UncompiledIssue>,
+        seen: MutableSet<String>,
+    ) {
+        val iterator = results.iterator()
+        while (iterator.hasNext()) {
+            val issue = iterator.next()
+            if (CompileLensPaths.normalize(issue.virtualFilePath) != normalizedPath) continue
+            seen.remove(issueKey(issue))
+            seen.remove(buildKey(issue))
+            iterator.remove()
+        }
+    }
+
+    private fun clearBuildErrorsForPath(projects: List<Project>, normalizedPath: String) {
         for (project in projects) {
-            val fileIndex = ProjectFileIndex.getInstance(project)
-            val javaFiles = collectJavaFilesForProject(project, fileIndex)
-            candidates.addAll(ProblemsCollector.getInstance(project).getProblemFiles())
-            val problemSolver = WolfTheProblemSolver.getInstance(project)
-            for (virtualFile in javaFiles) {
-                if (problemSolver.isProblemFile(virtualFile) || problemSolver.hasSyntaxErrors(virtualFile)) {
-                    candidates.add(virtualFile)
-                }
-            }
-            for (openFile in FileEditorManager.getInstance(project).openFiles) {
-                if (isScannableJava(openFile, fileIndex, includeOpenEditors = true)) {
-                    candidates.add(openFile)
-                }
-            }
+            CompileLensBuildErrorCache.removeFile(project, normalizedPath)
         }
+    }
 
-        return candidates.filter { isJavaFile(it) }.toSet()
+    /**
+     * Strong "file is genuinely clean per IntelliJ" check. Used to decide whether a
+     * stale javac build error can be evicted without waiting for a rebuild.
+     *
+     * Both conditions must hold:
+     *  - the live analyzer (DocumentMarkupModel + ProblemsCollector) reported no
+     *    error-severity findings right now;
+     *  - the PSI tree contains no [PsiErrorElement] (the file parses end-to-end).
+     *
+     * The PSI check guards against IntelliJ's recovering parser silently masking real
+     * javac structural errors like "reached end of file while parsing".
+     *
+     * We deliberately do NOT consult [WolfTheProblemSolver]: it flags any kind of
+     * problem, including warnings such as "unused import" — which would keep a file
+     * pinned to the dashboard after a compile-clean fix that happens to leave imports
+     * dangling (e.g. commenting out a whole method body).
+     */
+    private fun isAuthoritativelyClean(
+        @Suppress("UNUSED_PARAMETER") project: Project,
+        @Suppress("UNUSED_PARAMETER") virtualFile: VirtualFile,
+        psiFile: PsiJavaFile,
+        fileIssues: List<UncompiledIssue>,
+    ): Boolean {
+        if (fileIssues.isNotEmpty()) return false
+        if (PsiTreeUtil.findChildOfType(psiFile, PsiErrorElement::class.java) != null) return false
+        return true
     }
 
     private fun collectAllJavaFiles(projects: List<Project>): Set<VirtualFile> {
@@ -192,198 +352,12 @@ internal object UncompiledClassScanner {
         return files
     }
 
-    private fun collectFromProblemsCollector(
-        projects: List<Project>,
-        files: Set<VirtualFile>,
-        seen: MutableSet<String>,
-        results: MutableList<UncompiledIssue>,
-        logProject: Project,
-    ) {
-        for (virtualFile in files) {
-            val resolved = resolveJavaFile(projects, virtualFile) ?: run {
-                CompileLensDebugLog.warn(logProject, "collector: no PSI for ${virtualFile.path}")
-                continue
-            }
-            val (ownerProject, psiFile) = resolved
-            val collector = ProblemsCollector.getInstance(ownerProject)
-            val problems = collector.getFileProblems(virtualFile)
-            if (problems.isEmpty()) {
-                CompileLensDebugLog.info(logProject, "collector: ${virtualFile.name} problems=0")
-                continue
-            }
-
-            val severityRegistrar = SeverityRegistrar.getSeverityRegistrar(ownerProject)
-            val context = fileContext(ownerProject, virtualFile, psiFile)
-            var added = 0
-            var skipped = 0
-
-            for (problem in problems) {
-                if (!isErrorProblem(problem, severityRegistrar)) {
-                    skipped++
-                    continue
-                }
-                val line = problemLine(problem)
-                val detail = problemMessage(problem)
-                if (detail.isBlank() || isLoadingMessage(detail)) {
-                    skipped++
-                    continue
-                }
-                val before = results.size
-                addIssue(
-                    seen,
-                    results,
-                    key = "${virtualFile.path}:problem:${detail.lowercase(Locale.getDefault())}:$line",
-                    className = context.className,
-                    fileName = context.fileName,
-                    packageName = context.packageName,
-                    issueType = classifyDiagnosticIssue(detail),
-                    issueSummary = classifyDiagnosticIssue(detail).displayName,
-                    issueDetail = detail,
-                    moduleName = context.moduleName,
-                    lineNumber = line,
-                    filePath = virtualFile.path,
-                )
-                if (results.size > before) added++
-            }
-            CompileLensDebugLog.info(
-                logProject,
-                "collector: ${virtualFile.name} total=${problems.size} added=$added skipped=$skipped",
-            )
-        }
-    }
-
-    private fun collectFromDocumentHighlights(
-        projects: List<Project>,
-        files: Set<VirtualFile>,
-        seen: MutableSet<String>,
-        results: MutableList<UncompiledIssue>,
-        logProject: Project,
-    ) {
-        for (virtualFile in files) {
-            if (!virtualFile.isValid || virtualFile.isDirectory) continue
-            val resolved = resolveJavaFile(projects, virtualFile) ?: continue
-            val (ownerProject, psiFile) = resolved
-            val document = documentFor(ownerProject, psiFile, virtualFile) ?: run {
-                CompileLensDebugLog.warn(logProject, "highlights: no document for ${virtualFile.path}")
-                continue
-            }
-
-            val severityRegistrar = SeverityRegistrar.getSeverityRegistrar(ownerProject)
-            val highlights = collectErrorHighlights(ownerProject, document, severityRegistrar)
-            if (highlights.isEmpty()) {
-                CompileLensDebugLog.info(logProject, "highlights: ${virtualFile.name} count=0")
-                continue
-            }
-
-            val context = fileContext(ownerProject, virtualFile, psiFile)
-            var added = 0
-            for (highlight in highlights) {
-                val line = lineForOffset(document.textLength, highlight.actualStartOffset, document)
-                val detail = sanitizeDiagnosticText(highlight.description ?: highlight.toolTip ?: "Compilation error")
-                val issueType = classifyDiagnosticIssue(detail)
-                val before = results.size
-                addIssue(
-                    seen,
-                    results,
-                    key = "${virtualFile.path}:highlight:${detail.lowercase(Locale.getDefault())}:$line",
-                    className = context.className,
-                    fileName = context.fileName,
-                    packageName = context.packageName,
-                    issueType = issueType,
-                    issueSummary = issueType.displayName,
-                    issueDetail = detail,
-                    moduleName = context.moduleName,
-                    lineNumber = line,
-                    filePath = virtualFile.path,
-                )
-                if (results.size > before) added++
-            }
-            CompileLensDebugLog.info(logProject, "highlights: ${virtualFile.name} found=${highlights.size} added=$added")
-        }
-    }
-
     private fun resolveJavaFile(projects: List<Project>, virtualFile: VirtualFile): Pair<Project, PsiJavaFile>? {
         for (project in projects) {
             val psiFile = PsiManager.getInstance(project).findFile(virtualFile) as? PsiJavaFile
             if (psiFile != null) return project to psiFile
         }
         return null
-    }
-
-    private fun documentFor(project: Project, psiFile: PsiJavaFile, virtualFile: VirtualFile): Document? =
-        FileDocumentManager.getInstance().getDocument(virtualFile)
-            ?: PsiDocumentManager.getInstance(project).getDocument(psiFile)
-
-    /**
-     * Walks the document markup model directly so we do not miss highlights filtered by Code Insight context.
-     */
-    private fun collectErrorHighlights(
-        project: Project,
-        document: Document,
-        severityRegistrar: SeverityRegistrar,
-    ): List<HighlightInfo> {
-        val highlights = LinkedHashSet<HighlightInfo>()
-        val model = DocumentMarkupModel.forDocument(document, project, false) as? MarkupModelEx ?: return emptyList()
-        model.processRangeHighlightersOverlappingWith(0, document.textLength) { marker ->
-            val info = HighlightInfo.fromRangeHighlighter(marker) ?: return@processRangeHighlightersOverlappingWith true
-            if (info.highlighter == marker && severityRegistrar.compare(info.severity, HighlightSeverity.ERROR) >= 0) {
-                highlights.add(info)
-            }
-            true
-        }
-        return highlights.toList()
-    }
-
-    private data class FileContext(
-        val className: String,
-        val fileName: String,
-        val packageName: String,
-        val moduleName: String,
-    )
-
-    private fun fileContext(project: Project, virtualFile: VirtualFile, psiFile: PsiJavaFile): FileContext {
-        val fileName = virtualFile.name
-        return FileContext(
-            className = psiFile.classes.firstOrNull()?.name ?: fileName.removeSuffix(".java"),
-            fileName = fileName,
-            packageName = psiFile.packageName.ifBlank { "(default package)" },
-            moduleName = ModuleUtil.findModuleForFile(virtualFile, project)?.name ?: project.name,
-        )
-    }
-
-    private fun isErrorProblem(problem: Problem, severityRegistrar: SeverityRegistrar): Boolean {
-        val text = sanitizeDiagnosticText(problem.text)
-        if (isLoadingMessage(text)) return false
-
-        if (problem is HighlightingProblem) {
-            problem.info?.let { return severityRegistrar.compare(it.severity, HighlightSeverity.ERROR) >= 0 }
-            if (problem.severity >= HighlightSeverity.ERROR.myVal) return true
-        }
-
-        val lower = text.lowercase(Locale.getDefault())
-        if (lower.contains("never used") || lower.contains("unused import")) return false
-        return lower.contains("cannot resolve")
-            || lower.contains("cannot find symbol")
-            || lower.contains("identifier expected")
-            || lower.contains("';' expected")
-            || lower.contains("cannot access")
-            || lower.contains("incompatible types")
-            || lower.contains("syntax error")
-    }
-
-    private fun problemLine(problem: Problem): Int {
-        val fileProblem = problem as? FileProblem ?: return 1
-        val line = fileProblem.line
-        return if (line >= 0) line + 1 else 1
-    }
-
-    private fun problemMessage(problem: Problem): String {
-        val text = sanitizeDiagnosticText(problem.text)
-        val description = problem.description?.let { sanitizeDiagnosticText(it) }
-        return when {
-            description != null && description != text && description.isNotBlank() -> description
-            else -> text
-        }
     }
 
     private fun collectJavaFilesForProject(project: Project, fileIndex: ProjectFileIndex): Set<VirtualFile> {
@@ -411,82 +385,9 @@ internal object UncompiledClassScanner {
         }
     }
 
-    private fun isScannableJava(
-        virtualFile: VirtualFile,
-        fileIndex: ProjectFileIndex,
-        includeOpenEditors: Boolean = false,
-    ): Boolean {
+    private fun isScannableJava(virtualFile: VirtualFile, fileIndex: ProjectFileIndex): Boolean {
         if (!virtualFile.isValid || virtualFile.isDirectory) return false
-        if (!isJavaFile(virtualFile)) return false
-        if (fileIndex.isInSourceContent(virtualFile)) return true
-        return includeOpenEditors
-    }
-
-    private fun isJavaFile(virtualFile: VirtualFile): Boolean =
-        virtualFile.extension?.equals("java", ignoreCase = true) == true
-
-    private fun lineForOffset(textLength: Int, offset: Int, document: Document): Int {
-        if (textLength <= 0) return 1
-        val safeOffset = offset.coerceIn(0, textLength - 1)
-        return document.getLineNumber(safeOffset) + 1
-    }
-
-    private fun sanitizeDiagnosticText(raw: String): String {
-        val noHtml = raw.replace(Regex("<[^>]*>"), " ")
-        return noHtml.replace(Regex("\\s+"), " ").trim().ifBlank { "Compilation error" }
-    }
-
-    private fun isLoadingMessage(text: String): Boolean =
-        text.equals("Loading...", ignoreCase = true)
-
-    private fun classifyDiagnosticIssue(detail: String): IssueType {
-        val lower = detail.lowercase(Locale.getDefault())
-        if ("import" in lower && ("cannot resolve" in lower || "cannot find symbol" in lower)) {
-            return IssueType.UNRESOLVED_IMPORT
-        }
-        if ("package" in lower && "does not exist" in lower) {
-            return IssueType.MISSING_DEPENDENCY
-        }
-        if ("cannot resolve symbol" in lower || "cannot find symbol" in lower || "cannot access" in lower) {
-            return if ("class " in lower || "interface " in lower || "enum " in lower) {
-                IssueType.CLASS_NOT_FOUND
-            } else {
-                IssueType.MISSING_DEPENDENCY
-            }
-        }
-        if ("class not found" in lower || "cannot find class" in lower) {
-            return IssueType.CLASS_NOT_FOUND
-        }
-        return IssueType.COMPILATION_ERROR
-    }
-
-    private fun addIssue(
-        seen: MutableSet<String>,
-        results: MutableList<UncompiledIssue>,
-        key: String,
-        className: String,
-        fileName: String,
-        packageName: String,
-        issueType: IssueType,
-        issueSummary: String,
-        issueDetail: String,
-        moduleName: String,
-        lineNumber: Int,
-        filePath: String,
-    ) {
-        if (!seen.add(key)) return
-        val hasFixSuggestion = issueType == IssueType.MISSING_DEPENDENCY || issueType == IssueType.UNRESOLVED_IMPORT
-        results += UncompiledIssue(
-            className = className,
-            fileName = fileName,
-            packageName = packageName,
-            issueType = issueType,
-            issueSummary = issueSummary.replaceFirstChar { if (it.isLowerCase()) it.titlecase(Locale.getDefault()) else it.toString() },
-            issueDetail = issueDetail,
-            moduleName = moduleName,
-            lineNumber = lineNumber,
-            virtualFilePath = filePath,
-            hasFixSuggestion = hasFixSuggestion,
-        )
+        if (virtualFile.extension?.equals("java", ignoreCase = true) != true) return false
+        return fileIndex.isInSourceContent(virtualFile)
     }
 }
