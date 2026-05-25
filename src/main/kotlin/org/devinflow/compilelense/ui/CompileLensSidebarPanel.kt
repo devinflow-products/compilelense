@@ -6,6 +6,7 @@ import com.intellij.ui.components.JBCheckBox
 import com.intellij.ui.components.JBLabel
 import com.intellij.ui.components.JBPanel
 import com.intellij.util.ui.JBUI
+import org.devinflow.compilelense.CompileLensIcons
 import org.devinflow.compilelense.model.DashboardSnapshot
 import java.awt.BorderLayout
 import java.awt.Dimension
@@ -35,6 +36,9 @@ internal class CompileLensSidebarPanel(
     private val onRescanClicked: () -> Unit,
 ) : JBPanel<CompileLensSidebarPanel>(BorderLayout()) {
 
+    private val summaryStatusIcon = JBLabel(CompileLensIcons.SummaryClean).apply {
+        alignmentX = CENTER_ALIGNMENT
+    }
     private val summaryCountLabel = JBLabel("", SwingConstants.CENTER).apply {
         font = CompileLensUi.titleFont
         foreground = CompileLensUi.primaryText
@@ -132,10 +136,7 @@ internal class CompileLensSidebarPanel(
         alignmentX = LEFT_ALIGNMENT
         maximumSize = Dimension(Int.MAX_VALUE, preferredSize.height)
 
-        val iconLabel = JBLabel(AllIcons.General.Error).apply {
-            alignmentX = CENTER_ALIGNMENT
-        }
-        add(iconLabel)
+        add(summaryStatusIcon)
         add(Box.createVerticalStrut(JBUI.scale(8)))
         summaryCountLabel.alignmentX = CENTER_ALIGNMENT
         add(summaryCountLabel)
@@ -201,6 +202,7 @@ internal class CompileLensSidebarPanel(
         val count = snapshot.totalCount
         fixSuggestionCount = snapshot.fixSuggestionCount
         lastScan = snapshot.lastScan
+        summaryStatusIcon.icon = if (count > 0) CompileLensIcons.SummaryError else CompileLensIcons.SummaryClean
         summaryCountLabel.text = "<html><div style='text-align:center;'>$count Uncompiled Java Classes</div></html>"
         summaryModulesLabel.text = "Across ${snapshot.moduleCount} modules"
         updateFixSuggestionLabel()

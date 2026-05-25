@@ -23,7 +23,7 @@
 
         <toolWindow id="CompileLens"
                     factoryClass="org.devinflow.compilelense.CompileLensToolWindowFactory"
-                    icon="AllIcons.General.Error"
+                    icon="/icons/compileLensClean.svg"
                     anchor="right"
                     canCloseContents="true"/>
 
