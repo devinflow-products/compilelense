@@ -52,6 +52,7 @@ class CompileLensScanService(private val project: Project) : Disposable {
     private val scanInProgress = AtomicBoolean(false)
     private val pendingFullWorkspaceScan = AtomicBoolean(false)
     private val startupBaselineCompleted = AtomicBoolean(false)
+    private val snapshotDeferLogged = AtomicBoolean(false)
 
     /**
      * Timestamp of the last daemon restart initiated by CompileLens itself. A self-induced
@@ -71,7 +72,10 @@ class CompileLensScanService(private val project: Project) : Disposable {
                     if (!isRelevantChange(event)) continue
                     val file = event.file ?: continue
                     if (file.isJavaFile()) {
-                        file.path.let { CompileLensAnalysisSession.invalidateFileInWorkspace(it) }
+                        file.path.let { path ->
+                            CompileLensAnalysisSession.invalidateFileInWorkspace(path)
+                            CompileLensBuildErrorCache.removeFile(project, path)
+                        }
                         changedJavaFiles += file
                     }
                     if (file.path.endsWith("pom.xml") ||
@@ -123,20 +127,27 @@ class CompileLensScanService(private val project: Project) : Disposable {
                 scheduleLiveUpdateScan("daemon finished")
             }
         })
+        // ProblemsListener events fire only when a problem in [ProblemsCollector] actually
+        // appears, disappears, or changes severity — they carry real "something changed for
+        // the better/worse" information. Unlike [DaemonCodeAnalyzer.DaemonListener.daemonFinished]
+        // (which fires after every pass, including identity-result passes triggered by our own
+        // scheduleDaemonRestarts), a no-op daemon restart over the same content produces no
+        // problem events, so these listeners cannot create a self-feeding loop with the scan
+        // service. We therefore do NOT apply the self-daemon-restart quiet window here — doing
+        // so would swallow the very `problemDisappeared` event that tells us a user fix has
+        // taken effect, leaving the dashboard stuck on a stale error for any file whose daemon
+        // pass completes within the quiet window (which is almost every open Java file).
         connection.subscribe(ProblemsListener.TOPIC, object : ProblemsListener {
             override fun problemAppeared(problem: Problem) {
-                if (isWithinSelfDaemonRestartQuietWindow()) return
                 scheduleLiveUpdateScan("problem appeared")
             }
             override fun problemDisappeared(problem: Problem) {
                 problem.filePath()?.let { path ->
                     CompileLensAnalysisSession.invalidateFileInWorkspace(path)
                 }
-                if (isWithinSelfDaemonRestartQuietWindow()) return
                 scheduleLiveUpdateScan("problem disappeared")
             }
             override fun problemUpdated(problem: Problem) {
-                if (isWithinSelfDaemonRestartQuietWindow()) return
                 scheduleLiveUpdateScan("problem updated")
             }
         })
@@ -160,6 +171,7 @@ class CompileLensScanService(private val project: Project) : Disposable {
                                 ?: return@performWhenAllCommitted
                             val virtualFile = psiFile.virtualFile ?: return@performWhenAllCommitted
                             CompileLensAnalysisSession.invalidateFileInWorkspace(virtualFile.path)
+                            CompileLensBuildErrorCache.removeFile(project, virtualFile.path)
                             CompileLensWorkspaceAnalysis.scheduleDaemonRestarts(
                                 project,
                                 listOf(virtualFile),
@@ -351,23 +363,36 @@ class CompileLensScanService(private val project: Project) : Disposable {
             return
         }
 
+        val fullReplace = !scanResult.incremental
         val mergedIssues = CompileLensScanCoordinator.mergeScanIntoWorkspace(
             scannedFilePaths = scanResult.scannedFilePaths,
             scannedIssues = scanResult.issues,
-            fullReplace = !scanResult.incremental,
+            fullReplace = fullReplace,
         )
+        if (fullReplace && mergedIssues.isEmpty()) {
+            val cachedBuildErrors = pendingBuildErrorsInWorkspace()
+            if (cachedBuildErrors > 0 || CompileLensScanCoordinator.isRebuildInProgress()) {
+                // Keep the previous snapshot on screen. Build capture and rebuild
+                // completion already schedule follow-up scans; rescheduling here
+                // caused a tight loop of empty full scans while rebuildInProgress.
+                logSnapshotDeferredOnce(cachedBuildErrors)
+                return
+            }
+        }
         CompileLensScanCoordinator.syncWorkspaceIssues(mergedIssues)
 
         if (!scanResult.incremental) {
             CompileLensScanCoordinator.markWorkspaceSnapshotReady()
         }
 
-        val snapshot = DashboardSnapshot(mergedIssues, Instant.now())
+        snapshotDeferLogged.set(false)
+        val snapshot = DashboardSnapshot(mergedIssues, Instant.now(), scanResult.hasJavaSourceRoots)
         snapshotRef.set(snapshot)
         CompileLensDebugLog.info(
             project,
             "snapshot published: mode=${if (scanResult.incremental) "incremental" else "full"} " +
-                "classes=${snapshot.totalCount} projects=${CompileLensScanCoordinator.openProjects().map { it.name }}",
+                "classes=${snapshot.totalCount} sourceRoots=${snapshot.hasJavaSourceRoots} " +
+                "projects=${CompileLensScanCoordinator.openProjects().map { it.name }}",
         )
         notifyAllDashboardListeners(snapshot)
     }
@@ -389,6 +414,7 @@ class CompileLensScanService(private val project: Project) : Disposable {
         scanInProgress.set(false)
         pendingFullWorkspaceScan.set(false)
         startupBaselineCompleted.set(false)
+        snapshotDeferLogged.set(false)
         CompileLensScanCoordinator.resetWorkspaceSnapshotReady()
         errorService.clear()
         CompileLensAnalysisSession.clear(project)
@@ -399,6 +425,21 @@ class CompileLensScanService(private val project: Project) : Disposable {
             is FileProblem -> file?.path
             else -> null
         }
+
+    private fun pendingBuildErrorsInWorkspace(): Int =
+        CompileLensScanCoordinator.openProjects().sumOf { CompileLensBuildErrorCache.get(it).size }
+
+    private fun logSnapshotDeferredOnce(cachedBuildErrors: Int) {
+        if (!snapshotDeferLogged.compareAndSet(false, true)) return
+        CompileLensDebugLog.info(
+            project,
+            when {
+                cachedBuildErrors > 0 ->
+                    "snapshot deferred: scan returned 0 issues but build cache has $cachedBuildErrors javac error(s)"
+                else -> "snapshot deferred: workspace rebuild still in progress"
+            },
+        )
+    }
 
     companion object {
         private const val SCAN_DEBOUNCE_MS = 500

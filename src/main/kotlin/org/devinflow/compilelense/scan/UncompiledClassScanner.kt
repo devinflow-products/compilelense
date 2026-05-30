@@ -1,6 +1,7 @@
 package org.devinflow.compilelense.scan
 
 import com.intellij.analysis.problemsView.ProblemsCollector
+import com.intellij.codeInsight.daemon.impl.DaemonCodeAnalyzerEx
 import com.intellij.ide.highlighter.JavaFileType
 import com.intellij.openapi.fileEditor.FileEditorManager
 import com.intellij.openapi.module.ModuleManager
@@ -8,6 +9,7 @@ import com.intellij.openapi.module.ModuleUtil
 import com.intellij.openapi.project.DumbService
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.roots.ProjectFileIndex
+import com.intellij.openapi.roots.ProjectRootManager
 import com.intellij.openapi.vfs.VirtualFile
 import com.intellij.psi.PsiErrorElement
 import com.intellij.psi.PsiJavaFile
@@ -36,7 +38,11 @@ internal object UncompiledClassScanner {
         )
 
         val allSources = collectAllJavaFiles(projects)
-        CompileLensDebugLog.info(triggeringProject, "java sources=${allSources.size}")
+        val hasJavaSourceRoots = anyProjectHasSourceRoots(projects)
+        CompileLensDebugLog.info(
+            triggeringProject,
+            "java sources=${allSources.size} sourceRoots=$hasJavaSourceRoots",
+        )
 
         val openPathsByProject = buildOpenPathsByProject(projects)
         val priorityPaths = buildPriorityPaths(projects, previouslyTrackedPaths, openPathsByProject)
@@ -72,8 +78,20 @@ internal object UncompiledClassScanner {
             scannedFilePaths = filesToCollect.map { CompileLensPaths.normalize(it) }.toSet(),
             incremental = mode == CompileLensScanMode.INCREMENTAL,
             daemonRestartsByProject = daemonRestartsByProject.mapKeys { CompileLensScanResult.ProjectRef(it.key) },
+            hasJavaSourceRoots = hasJavaSourceRoots,
         )
     }
+
+    /**
+     * True when any open project has at least one configured source content root.
+     *
+     * A folder opened without being imported as a Maven/Gradle/JPS project produces
+     * a default module with no source roots — every Java file then fails
+     * [ProjectFileIndex.isInSourceContent] and the dashboard stays empty. The
+     * dashboard uses this flag to distinguish "no errors" from "nothing scanned".
+     */
+    private fun anyProjectHasSourceRoots(projects: List<Project>): Boolean =
+        projects.any { ProjectRootManager.getInstance(it).contentSourceRoots.isNotEmpty() }
 
     private fun selectFilesToCollect(
         triggeringProject: Project,
@@ -250,8 +268,17 @@ internal object UncompiledClassScanner {
                 // a strong "user fixed it in-IDE" signal. Drop both the live and the
                 // javac build entries (cache included) so the dashboard reflects the fix
                 // immediately, without requiring a rebuild.
-                removeAllIssuesForPath(normalizedPath, results, seen)
-                clearBuildErrorsForPath(projects, normalizedPath)
+                //
+                // Do not evict javac rows for files that were only opened (e.g. from Build
+                // Output) but never edited — the daemon can report "finished" with zero
+                // highlights before it has actually analyzed the file, which used to wipe
+                // every other file's build errors and leave the dashboard at 0–1 classes.
+                if (mayEvictBuildErrors(projects, ownerProject, normalizedPath)) {
+                    removeAllIssuesForPath(normalizedPath, results, seen)
+                    clearBuildErrorsForPath(projects, normalizedPath)
+                } else {
+                    removeLiveIssuesForPath(normalizedPath, results, seen)
+                }
             } else {
                 // Otherwise refresh only the live (PSI/highlight/problem) entries for
                 // this file and keep any javac build error already merged. javac is
@@ -316,14 +343,46 @@ internal object UncompiledClassScanner {
         }
     }
 
+    private fun mayEvictBuildErrors(
+        projects: List<Project>,
+        ownerProject: Project,
+        normalizedPath: String,
+    ): Boolean {
+        val hasCachedBuildErrors = projects.any { project ->
+            CompileLensBuildErrorCache.get(project).any {
+                CompileLensPaths.normalize(it.virtualFilePath) == normalizedPath
+            }
+        }
+        if (!hasCachedBuildErrors) return true
+        return CompileLensAnalysisSession.isDirtyInAnyProject(normalizedPath) ||
+            CompileLensAnalysisSession.isKnownClean(ownerProject, normalizedPath)
+    }
+
     /**
      * Strong "file is genuinely clean per IntelliJ" check. Used to decide whether a
-     * stale javac build error can be evicted without waiting for a rebuild.
+     * stale javac build error can be evicted (cache included) without waiting for a
+     * rebuild — i.e. the user fixed the error in-IDE and we want the dashboard to
+     * reflect that immediately.
      *
-     * Both conditions must hold:
+     * All three conditions must hold:
      *  - the live analyzer (DocumentMarkupModel + ProblemsCollector) reported no
      *    error-severity findings right now;
-     *  - the PSI tree contains no [PsiErrorElement] (the file parses end-to-end).
+     *  - the PSI tree contains no [PsiErrorElement] (the file parses end-to-end);
+     *  - [DaemonCodeAnalyzer.isErrorAnalyzingFinished] reports the daemon has
+     *    completed at least one error-finding pass on this file.
+     *
+     * The third gate is the critical one for dashboard integrity: when the user
+     * clicks a build-error line in the Build Output panel IntelliJ navigates to the
+     * source file, which means the file becomes `isOpen=true` *immediately* — but
+     * the daemon has not yet had a chance to highlight it. Without the
+     * `isErrorAnalyzingFinished` gate, [analyzeFile] returns an empty fileIssues
+     * list, [PsiErrorElement] is null (Java's recovering parser tolerates "cannot
+     * find symbol"-style errors), and we silently conclude the file is clean.
+     * [collectIssues] then calls [clearBuildErrorsForPath], deleting the javac
+     * entries for every closed-but-just-clicked file, and the dashboard collapses
+     * to only the file that's been open long enough for the daemon to analyze
+     * it (typically the editor's active tab — exactly the screenshot symptom of
+     * "only 1 of 4 javac errors shows up after a Rebuild").
      *
      * The PSI check guards against IntelliJ's recovering parser silently masking real
      * javac structural errors like "reached end of file while parsing".
@@ -334,13 +393,14 @@ internal object UncompiledClassScanner {
      * dangling (e.g. commenting out a whole method body).
      */
     private fun isAuthoritativelyClean(
-        @Suppress("UNUSED_PARAMETER") project: Project,
+        project: Project,
         @Suppress("UNUSED_PARAMETER") virtualFile: VirtualFile,
         psiFile: PsiJavaFile,
         fileIssues: List<UncompiledIssue>,
     ): Boolean {
         if (fileIssues.isNotEmpty()) return false
         if (PsiTreeUtil.findChildOfType(psiFile, PsiErrorElement::class.java) != null) return false
+        if (!DaemonCodeAnalyzerEx.getInstanceEx(project).isErrorAnalyzingFinished(psiFile)) return false
         return true
     }
 

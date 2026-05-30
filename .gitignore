@@ -1,4 +1,7 @@
 .gradle
 .idea
 .intellijPlatform
-build
+# Anchor to the project root so the gradle output directory is ignored
+# but the Kotlin source package src/main/kotlin/org/devinflow/compilelense/build/
+# (CompileLensBuildCapture, CompileLensBuildTrigger) stays tracked.
+/build/

@@ -3,10 +3,7 @@ package org.devinflow.compilelense.scan
 import com.intellij.analysis.problemsView.FileProblem
 import com.intellij.analysis.problemsView.Problem
 import com.intellij.analysis.problemsView.ProblemsCollector
-import com.intellij.analysis.problemsView.toolWindow.HighlightingProblem
-import com.intellij.codeInsight.daemon.impl.HighlightInfo
 import com.intellij.codeInsight.daemon.impl.SeverityRegistrar
-import com.intellij.lang.annotation.HighlightSeverity
 import com.intellij.openapi.editor.Document
 import com.intellij.openapi.fileEditor.FileDocumentManager
 import com.intellij.openapi.module.ModuleUtil
@@ -53,9 +50,10 @@ internal object CompileLensJavaFileAnalyzer {
 
         val severityRegistrar = SeverityRegistrar.getSeverityRegistrar(ownerProject)
         val context = fileContext(ownerProject, virtualFile, psiFile)
+        val errorLines = errorHighlightLines(ownerProject, virtualFile, psiFile, severityRegistrar)
 
         for (problem in problems) {
-            if (!isErrorProblem(problem, severityRegistrar)) continue
+            if (!isErrorProblem(problem, errorLines)) continue
             val line = problemLine(problem)
             val detail = problemMessage(problem)
             if (detail.isBlank() || isLoadingMessage(detail)) continue
@@ -137,13 +135,38 @@ internal object CompileLensJavaFileAnalyzer {
         )
     }
 
-    private fun isErrorProblem(problem: Problem, severityRegistrar: SeverityRegistrar): Boolean {
+    /**
+     * Determines whether a [Problem] reported by `ProblemsCollector` should be treated as a
+     * compilation error.
+     *
+     * `ProblemsCollector.getFileProblems` returns problems of every severity (errors, warnings,
+     * weak warnings, infos), so we have to filter to error-severity ourselves. The previous
+     * implementation reached into `HighlightingProblem.getInfo()` / `getSeverity()`, but those
+     * accessors and the `HighlightingProblem` class itself are `@ApiStatus.Internal` and
+     * therefore off-limits to third-party plugins.
+     *
+     * Instead we treat the document's markup model as the authoritative source of "is there an
+     * error-severity highlight on this line right now?". [errorLines] is the set of lines that
+     * currently carry an error-severity range highlighter for this file:
+     *
+     *  - `null`     -> the document/markup model is unavailable (closed file with no document
+     *                  loaded, or invalid VFS file); fall back to text-keyword heuristics.
+     *  - non-null   -> the markup is authoritative; a problem whose line is not in [errorLines]
+     *                  is NOT an error, regardless of what its message text says.
+     *
+     * The previous version always fell back to text heuristics whenever the line was missing
+     * from [errorLines], including for open files. That re-promoted warnings/infos whose text
+     * happens to contain words like "cannot resolve" or "unresolved" to ERROR — producing
+     * phantom dashboard rows on lines that have no error highlight (e.g. "line 6" entries for
+     * files whose real errors are on different lines). Trusting the markup when it exists
+     * eliminates that class of false positive.
+     */
+    private fun isErrorProblem(problem: Problem, errorLines: Set<Int>?): Boolean {
         val text = sanitizeDiagnosticText(problem.text)
         if (isLoadingMessage(text)) return false
 
-        if (problem is HighlightingProblem) {
-            problem.info?.let { return severityRegistrar.compare(it.severity, HighlightSeverity.ERROR) >= 0 }
-            if (problem.severity >= HighlightSeverity.ERROR.myVal) return true
+        if (errorLines != null) {
+            return problemLine(problem) in errorLines
         }
 
         val lower = text.lowercase(Locale.getDefault())
@@ -158,6 +181,34 @@ internal object CompileLensJavaFileAnalyzer {
             || lower.contains("incompatible types")
             || lower.contains("syntax error")
             || lower.contains("unresolved")
+    }
+
+    /**
+     * Returns the 1-based line numbers that currently carry an error-severity range
+     * highlighter in the document's markup model, or `null` if the markup model is not
+     * accessible (no document, invalid VFS file). A non-null empty set means "document
+     * exists and the daemon reports zero error highlights" — that is authoritative.
+     */
+    private fun errorHighlightLines(
+        project: Project,
+        virtualFile: VirtualFile,
+        psiFile: PsiJavaFile,
+        severityRegistrar: SeverityRegistrar,
+    ): Set<Int>? {
+        if (!virtualFile.isValid || virtualFile.isDirectory) return null
+        val document = documentFor(project, psiFile, virtualFile) ?: return null
+        val highlights = CompileLensHighlightCollector.collectErrorHighlights(
+            project,
+            document,
+            severityRegistrar,
+        )
+        if (highlights.isEmpty()) return emptySet()
+        val lines = HashSet<Int>()
+        val textLength = document.textLength
+        for (info in highlights) {
+            lines += lineForOffset(textLength, info.actualStartOffset, document)
+        }
+        return lines
     }
 
     private fun problemLine(problem: Problem): Int {

@@ -5,6 +5,14 @@ import java.time.Instant
 data class DashboardSnapshot(
     val issues: List<UncompiledIssue>,
     val lastScan: Instant,
+    /**
+     * False when the most recent scan saw zero Java source roots across every open
+     * project — typically because the folder was opened without being imported as a
+     * Maven/Gradle/JPS project. Used by the dashboard to surface a one-line hint
+     * instead of an empty table. Defaults to true so the bootstrap snapshot
+     * ([Instant.EPOCH]) does not flash the hint before the first real scan runs.
+     */
+    val hasJavaSourceRoots: Boolean = true,
 ) {
     val uncompiledClasses: List<UncompiledClassRow> by lazy { UncompiledClassRow.fromIssues(issues) }
 

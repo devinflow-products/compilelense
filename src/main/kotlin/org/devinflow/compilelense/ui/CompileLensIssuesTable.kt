@@ -89,6 +89,10 @@ internal class CompileLensIssuesTable(private val project: Project) : JBTable() 
         })
     }
 
+    override fun getScrollableTracksViewportHeight(): Boolean = false
+
+    override fun getScrollableTracksViewportWidth(): Boolean = false
+
     fun onViewportResized() = resizeColumnsToFit()
 
     fun setIssues(issues: List<UncompiledClassRow>) {
@@ -205,13 +209,26 @@ internal class CompileLensIssuesTable(private val project: Project) : JBTable() 
         applyColumnWidths(columnModel, available, widths)
     }
 
+    private fun preferredTableHeight(): Int {
+        val headerHeight = tableHeader.preferredSize.height
+        if (rowCount == 0) return headerHeight + rowHeight
+        var height = headerHeight
+        for (row in 0 until rowCount) {
+            height += getRowHeight(row)
+        }
+        return height
+    }
+
     private fun applyColumnWidths(columnModel: TableColumnModel, available: Int, widths: IntArray) {
         applyingColumnLayout = true
         try {
             setColumnWidth(columnModel, 0, widths[0])
             setColumnWidth(columnModel, 1, widths[1])
             setColumnWidth(columnModel, 2, widths[2])
-            preferredSize = java.awt.Dimension(available, preferredSize.height)
+            preferredSize = java.awt.Dimension(
+                maxOf(available, widths.sum()),
+                preferredTableHeight(),
+            )
             revalidate()
         } finally {
             applyingColumnLayout = false

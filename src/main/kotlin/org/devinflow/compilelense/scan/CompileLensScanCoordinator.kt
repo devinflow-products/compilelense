@@ -32,6 +32,8 @@ object CompileLensScanCoordinator {
         workspaceSnapshotReady.set(false)
     }
 
+    fun isRebuildInProgress(): Boolean = rebuildInProgress.get()
+
     fun aggregateWorkspaceIssues(): List<UncompiledIssue> =
         openProjects()
             .flatMap { CompilationErrorService.getInstance(it).getAllIssues() }
@@ -77,8 +79,35 @@ object CompileLensScanCoordinator {
     }
 
     fun dedupeIssues(issues: List<UncompiledIssue>): List<UncompiledIssue> =
-        issues.distinctBy { "${it.virtualFilePath}:${it.lineNumber}:${it.issueDetail.lowercase(Locale.getDefault())}" }
+        issues
+            .groupBy { "${CompileLensPaths.normalize(it.virtualFilePath)}:${issueSymbolKey(it.issueDetail)}" }
+            .map { (_, group) -> group.maxBy { issueDedupePriority(it) } }
             .sortedWith(compareBy({ it.projectName }, { it.moduleName }, { it.fileName }, { it.lineNumber }))
+
+    /**
+     * Groups IDE and javac diagnostics that refer to the same unresolved symbol on a file.
+     * Falls back to the full message when no symbol can be extracted.
+     */
+    private fun issueSymbolKey(detail: String): String {
+        val lower = detail.lowercase(Locale.getDefault())
+        val quoted = Regex("""cannot resolve symbol '([^']+)'""").find(lower)?.groupValues?.get(1)
+        if (quoted != null) return "sym:$quoted"
+        val javacSymbol = Regex("""symbol:\s*(?:class|method|variable)\s+(\S+)""").find(lower)?.groupValues?.get(1)
+        if (javacSymbol != null) return "sym:$javacSymbol"
+        return "msg:${lower.replace(Regex("\\s+"), " ").trim()}"
+    }
+
+    /**
+     * Prefer live IDE diagnostics over stale javac rows, and prefer the latest line number
+     * when imports/edits shift code (javac line numbers go stale until the next rebuild).
+     */
+    private fun issueDedupePriority(issue: UncompiledIssue): Int {
+        var score = issue.lineNumber
+        if (!issue.issueDetail.trimStart().startsWith("java:", ignoreCase = true)) {
+            score += 10_000
+        }
+        return score
+    }
 
     /**
      * One-time workspace bootstrap: rebuild every open project so javac errors populate the dashboard

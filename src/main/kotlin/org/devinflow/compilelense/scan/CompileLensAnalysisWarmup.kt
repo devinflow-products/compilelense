@@ -22,6 +22,7 @@ import com.intellij.psi.PsiManager
 import com.intellij.psi.search.FileTypeIndex
 import com.intellij.psi.search.GlobalSearchScope
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * IntelliJ only highlights and marks a project red after a file has been analyzed by the daemon
@@ -32,6 +33,13 @@ internal object CompileLensAnalysisWarmup {
 
     private const val MAX_FILES_PER_PROJECT = 300
     private const val WARMUP_TIMEOUT_MS = 120_000L
+
+    /**
+     * Quiet period after the most recent `daemonFinished` event before we conclude the daemon
+     * is idle. Must be longer than the typical gap between two consecutive daemon passes so we
+     * do not exit the warmup wait in the middle of an inter-pass pause.
+     */
+    private const val DAEMON_QUIET_MS = 750L
 
     fun ensureAnalyzed(projects: List<Project>, logProject: Project) {
         var scheduled = 0
@@ -87,12 +95,7 @@ internal object CompileLensAnalysisWarmup {
             "warmup scheduling: project=${project.name} files=${filesToWarm.size}",
         )
 
-        for (psiFile in filesToWarm) {
-            ProgressManager.checkCanceled()
-            daemon.restart(psiFile, "CompileLens warmup")
-        }
-
-        val finished = waitForDaemonIdle(daemon)
+        val finished = restartAndAwaitDaemonIdle(project, daemon, filesToWarm)
         if (!finished) {
             CompileLensDebugLog.warn(
                 logProject,
@@ -103,21 +106,68 @@ internal object CompileLensAnalysisWarmup {
         return WarmupStats(filesToWarm.size, skipped)
     }
 
-    private fun waitForDaemonIdle(daemon: DaemonCodeAnalyzer): Boolean {
+    /**
+     * Issues daemon restarts for [filesToWarm] and waits until the daemon goes idle.
+     *
+     * The previous implementation polled `DaemonCodeAnalyzer.isRunning`, but that accessor is
+     * marked `@ApiStatus.Internal` and is therefore off-limits for third-party plugins. We
+     * replace the polling with a subscription to the public `DAEMON_EVENT_TOPIC`: every time the
+     * daemon completes a pass it fires `daemonFinished()`. After the queued restarts run, we
+     * consider the daemon idle once we have observed at least one `daemonFinished` event AND no
+     * further events for [DAEMON_QUIET_MS] (so we don't bail out between two consecutive passes
+     * the daemon performs over our batch of files).
+     *
+     * The listener is subscribed *before* we issue the restarts so we cannot miss the first
+     * `daemonFinished` event in the rare case the daemon completes before we start waiting.
+     */
+    private fun restartAndAwaitDaemonIdle(
+        project: Project,
+        daemon: DaemonCodeAnalyzer,
+        filesToWarm: List<PsiJavaFile>,
+    ): Boolean {
+        if (filesToWarm.isEmpty()) return true
+        val lastFinishedNanos = AtomicLong(0L)
+        val connection = project.messageBus.connect()
+        try {
+            connection.subscribe(
+                DaemonCodeAnalyzer.DAEMON_EVENT_TOPIC,
+                object : DaemonCodeAnalyzer.DaemonListener {
+                    override fun daemonFinished() {
+                        lastFinishedNanos.set(System.nanoTime())
+                    }
+                },
+            )
+
+            for (psiFile in filesToWarm) {
+                ProgressManager.checkCanceled()
+                daemon.restart(psiFile, "CompileLens warmup")
+            }
+
+            return waitForDaemonQuietPeriod(lastFinishedNanos)
+        } finally {
+            connection.disconnect()
+        }
+    }
+
+    private fun waitForDaemonQuietPeriod(lastFinishedNanos: AtomicLong): Boolean {
         val deadlineNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(WARMUP_TIMEOUT_MS)
+        val quietNanos = TimeUnit.MILLISECONDS.toNanos(DAEMON_QUIET_MS)
         while (System.nanoTime() < deadlineNanos) {
             ProgressManager.checkCanceled()
-            if (!daemon.isRunning) {
-                return true
-            }
+            if (isQuiet(lastFinishedNanos, quietNanos)) return true
             try {
-                Thread.sleep(25)
+                Thread.sleep(50)
             } catch (_: InterruptedException) {
                 Thread.currentThread().interrupt()
                 throw ProcessCanceledException()
             }
         }
-        return !daemon.isRunning
+        return isQuiet(lastFinishedNanos, quietNanos)
+    }
+
+    private fun isQuiet(lastFinishedNanos: AtomicLong, quietNanos: Long): Boolean {
+        val last = lastFinishedNanos.get()
+        return last != 0L && System.nanoTime() - last >= quietNanos
     }
 
     private fun hasErrorHighlights(

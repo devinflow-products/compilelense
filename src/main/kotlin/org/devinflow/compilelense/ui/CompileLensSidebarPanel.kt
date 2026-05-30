@@ -55,6 +55,8 @@ internal class CompileLensSidebarPanel(
     private val moduleListPanel = JPanel().apply {
         layout = BoxLayout(this, BoxLayout.Y_AXIS)
         isOpaque = false
+        alignmentX = LEFT_ALIGNMENT
+        maximumSize = Dimension(Int.MAX_VALUE, Int.MAX_VALUE)
     }
     val moduleFilterCombo = JComboBox(arrayOf("All Modules"))
     val showOnlyOpenFilesCheck = JBCheckBox("Show only open files")
@@ -100,7 +102,9 @@ internal class CompileLensSidebarPanel(
             JScrollPane(scrollContent).apply {
                 border = null
                 horizontalScrollBarPolicy = ScrollPaneConstants.HORIZONTAL_SCROLLBAR_AS_NEEDED
+                verticalScrollBarPolicy = ScrollPaneConstants.VERTICAL_SCROLLBAR_AS_NEEDED
                 verticalScrollBar.unitIncrement = JBUI.scale(16)
+                horizontalScrollBar.unitIncrement = JBUI.scale(16)
             },
             BorderLayout.CENTER,
         )
@@ -168,7 +172,7 @@ internal class CompileLensSidebarPanel(
         layout = BoxLayout(this, BoxLayout.Y_AXIS)
         isOpaque = false
         alignmentX = LEFT_ALIGNMENT
-        maximumSize = Dimension(Int.MAX_VALUE, preferredSize.height)
+        maximumSize = Dimension(Int.MAX_VALUE, Int.MAX_VALUE)
         add(JBLabel(title).apply {
             font = CompileLensUi.sectionFont
             foreground = CompileLensUi.primaryText
@@ -183,7 +187,7 @@ internal class CompileLensSidebarPanel(
         layout = BoxLayout(this, BoxLayout.Y_AXIS)
         isOpaque = false
         alignmentX = LEFT_ALIGNMENT
-        maximumSize = Dimension(Int.MAX_VALUE, preferredSize.height)
+        maximumSize = Dimension(Int.MAX_VALUE, Int.MAX_VALUE)
         add(JBLabel("Filters").apply {
             font = CompileLensUi.sectionFont
             foreground = CompileLensUi.primaryText
